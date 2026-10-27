@@ -1,0 +1,9 @@
+jadx-out/
+apk-unzip/
+*.apk
+demo.log
+anon_token.json
+jadx.log
+iseg*.json
+mask_resp.json
+__pycache__/
