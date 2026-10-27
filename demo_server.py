@@ -204,6 +204,8 @@ class H(BaseHTTPRequestHandler):
             if self.path == "/api/upscale": return self._upscale(body)
             if self.path == "/api/erase": return self._erase(body)
             if self.path == "/api/fill": return self._fill(body)
+            if self.path == "/api/inpaint": return self._inpaint(body)
+            if self.path == "/api/uncrop": return self._uncrop(body)
             if self.path == "/v1/images/edits": return self._openai_edits(body)
             return self._json(404, {"error": {"message": "unknown endpoint"}})
         except Exception as e:
@@ -270,6 +272,63 @@ class H(BaseHTTPRequestHandler):
         st, _, resp = _http_err(f"{DIF_BASE}/v1/fill", "POST",
                                 {**self._tok_hdr(), "Content-Type": f"multipart/form-data; boundary={bnd}"}, mp, 180)
         if st != 200: return self._json(st, {"upstream": resp.decode("utf-8", "replace")[:400]})
+        return self._send(200, resp, "image/jpeg")
+
+    def _inpaint(self, body):
+        """AI 局部重绘: image + mask(白=重绘区) + prompt(暂不生效, 上游用 strokes 语义)"""
+        _, files = parse_multipart(self.headers.get("Content-Type", ""), body)
+        img = files["image"][1] if "image" in files else (files["imageFile"][1] if "imageFile" in files else None)
+        mask = files["mask"][1] if "mask" in files else (files["maskFile"][1] if "maskFile" in files else None)
+        if not img or not mask: return self._json(400, {"error": {"message": "need image + mask"}})
+        payload = {"b64_img": base64.b64encode(img).decode(),
+                   "b64_mask": base64.b64encode(mask).decode(),
+                   "experiment_flag": "default"}
+        st, _, resp = _http_err(f"{SEG_BASE}/v1/inpaint", "POST",
+                                {**self._tok_hdr(), "Content-Type": "application/json"},
+                                json.dumps(payload).encode(), 180)
+        if st != 200: return self._json(st, {"upstream": resp.decode("utf-8", "replace")[:400]})
+        try:
+            b64 = json.loads(resp)["result"]
+        except Exception:
+            return self._json(502, {"error": {"message": "unexpected upstream format"}})
+        return self._send(200, base64.b64decode(b64), "image/jpeg")
+
+    def _uncrop(self, body):
+        """AI 外扩: image + 目标宽高(target_w/target_h 表单字段, 默认 1.5x) — 自动构画布与 mask"""
+        fields, files = parse_multipart(self.headers.get("Content-Type", ""), body)
+        img = files["image"][1] if "image" in files else (files["imageFile"][1] if "imageFile" in files else None)
+        if not img: return self._json(400, {"error": {"message": "need image"}})
+        from PIL import Image, ImageDraw
+        try:
+            src = Image.open(io.BytesIO(img)).convert("RGB")
+        except Exception:
+            return self._json(400, {"error": {"message": "invalid image"}})
+        try:
+            tw = max(64, min(2048, int(float(fields.get("target_w", src.width * 1.5)))))
+            th = max(64, min(2048, int(float(fields.get("target_h", src.height * 1.5)))))
+        except ValueError:
+            return self._json(400, {"error": {"message": "target_w/target_h must be numbers"}})
+        # 上游对非目标比例的画布会随机 IncompleteRead，画布直接用目标尺寸(≤2048 已 clamp)
+        cw, ch = tw, th
+        scaled = src.resize((cw, ch))
+        canvas = Image.new("RGB", (cw, ch), (0, 0, 0))
+        mask = Image.new("L", (cw, ch), 0)
+        md = ImageDraw.Draw(mask)
+        out_w = max(1, int(src.width * cw / max(tw, src.width)))
+        out_h = max(1, int(src.height * ch / max(th, src.height)))
+        paste = scaled.resize((out_w, out_h))
+        ox, oy = (cw - out_w) // 2, (ch - out_h) // 2
+        canvas.paste(paste, (ox, oy))
+        md.rectangle([ox, oy, ox + out_w, oy + out_h], fill=255)
+        cb, mb = io.BytesIO(), io.BytesIO()
+        canvas.save(cb, "PNG"); mask.save(mb, "PNG")
+        bnd, mp = build_multipart({"prompt": fields.get("prompt", ""), "seed": "0"},
+                                  {"imageFile": ("image.png", cb.getvalue(), "image/png"),
+                                   "maskFile": ("mask.png", mb.getvalue(), "image/png")})
+        st, _, resp = _http_err(f"{SRV_BASE}/v2/uncrop", "POST",
+                                {**self._tok_hdr(), "Content-Type": f"multipart/form-data; boundary={bnd}"}, mp, 240)
+        if st != 200 or not resp:
+            return self._json(st if st != 200 else 502, {"upstream": resp.decode("utf-8", "replace")[:400]})
         return self._send(200, resp, "image/jpeg")
 
     def _openai_edits(self, body):

@@ -62,6 +62,11 @@ bench("erase x4 c2", 4, lambda: req("/api/erase", body3, hd3, 180), 2)
 # 7. fill x4 c2
 hd4, body4 = multipart({"prompt": "blue sky"}, {"image": ("t.jpg", img, "image/jpeg"), "mask": ("m.png", mask, "image/png")})
 bench("fill x4 c2", 4, lambda: req("/api/fill", body4, hd4, 180), 2)
+# 8. inpaint x4 c2
+bench("inpaint x4 c2", 4, lambda: req("/api/inpaint", body3, hd3, 180), 2)
+# 9. uncrop x4 c2
+hd5, body5 = multipart({"target_w": "384", "target_h": "384"}, {"image": ("t.jpg", img, "image/jpeg")})
+bench("uncrop x4 c2", 4, lambda: req("/api/uncrop", body5, hd5, 240), 2)
 # 8. 错误路径
 st, _, _ = req("/api/mask", b"", {"Content-Type": "multipart/form-data; boundary=x"}, 15)
 print(f"错误路径 no-image  : {st} (期望400/502)")
